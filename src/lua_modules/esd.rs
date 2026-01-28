@@ -1,5 +1,3 @@
-use std::iter;
-
 use eldenring::{
     cs::{BlockId, FieldInsHandle, FieldInsSelector, TalkScript, WorldChrMan},
     ez_state::{EzStateEvent, EzStateValue},
@@ -54,22 +52,50 @@ fn esd_value_from_lua(value: &LuaValue) -> LuaResult<EzStateValue> {
     })
 }
 
+fn lua_value_from_esd(value: EzStateValue, is_bool_result: bool) -> LuaResult<LuaValue> {
+    Ok(match value {
+        EzStateValue::Float32(value) => {
+            if is_bool_result {
+                LuaValue::Boolean(value != 0f32)
+            } else {
+                LuaValue::Number(value as f64)
+            }
+        }
+        EzStateValue::Int32(value) => {
+            if is_bool_result {
+                LuaValue::Boolean(value != 0i32)
+            } else {
+                LuaValue::Integer(value as i64)
+            }
+        }
+        EzStateValue::Unk64(_) => {
+            return Err(LuaError::ToLuaConversionError {
+                from: "EzStateValue".to_string(),
+                to: "other",
+                message: None,
+            });
+        }
+    })
+}
+
 // Create a Lua wrapper function for invoking an ESD event with the given ID and argument count
 fn event_function(lua: &Lua, event_id: i32, arg_count: usize) -> LuaResult<LuaFunction> {
     assert!(arg_count < EzStateEvent::default().args.capacity());
 
-    lua.create_function(move |lua: &Lua, values: LuaMultiValue| {
-        let args: Vec<_> = iter::once(Ok(EzStateValue::Int32(event_id)))
-            .chain(values.iter().take(arg_count).map(esd_value_from_lua))
-            .collect::<LuaResult<_>>()?;
-
+    lua.create_function(move |lua: &Lua, args: LuaMultiValue| {
         let mut context = lua.app_data_mut::<ESDLuaContext>().unwrap();
 
         context.set_chr()?;
 
         context
             .talk_script
-            .event(args)
+            .event((
+                event_id,
+                args.iter()
+                    .take(arg_count)
+                    .map(esd_value_from_lua)
+                    .collect::<LuaResult<Vec<_>>>()?,
+            ))
             .map_err(LuaError::external)?;
 
         Ok(())
@@ -86,33 +112,23 @@ fn env_function(
     assert!(arg_count < 8);
 
     lua.create_function(
-        move |lua: &Lua, values: LuaMultiValue| -> LuaResult<LuaValue> {
-            let args: Vec<_> = iter::once(Ok(EzStateValue::Int32(env_id)))
-                .chain(values.iter().take(arg_count).map(esd_value_from_lua))
-                .collect::<LuaResult<_>>()?;
-
+        move |lua: &Lua, args: LuaMultiValue| -> LuaResult<LuaValue> {
             let mut context = lua.app_data_mut::<ESDLuaContext>().unwrap();
 
             context.set_chr()?;
 
-            let result = context.talk_script.env(args).map_err(LuaError::external)?;
-            match result {
-                EzStateValue::Float32(value) => Ok(if is_bool_result {
-                    LuaValue::Boolean(value != 0f32)
-                } else {
-                    LuaValue::Number(value as f64)
-                }),
-                EzStateValue::Int32(value) => Ok(if is_bool_result {
-                    LuaValue::Boolean(value != 0i32)
-                } else {
-                    LuaValue::Integer(value as i64)
-                }),
-                EzStateValue::Unk64(_) => Err(LuaError::ToLuaConversionError {
-                    from: "EzStateValue".to_string(),
-                    to: "other",
-                    message: None,
-                }),
-            }
+            let result = context
+                .talk_script
+                .env((
+                    env_id,
+                    args.iter()
+                        .take(arg_count)
+                        .map(esd_value_from_lua)
+                        .collect::<LuaResult<Vec<_>>>()?,
+                ))
+                .map_err(LuaError::external)?;
+
+            lua_value_from_esd(result, is_bool_result)
         },
     )
 }
